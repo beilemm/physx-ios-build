@@ -1,0 +1,221 @@
+workflows:
+  physx-ios:
+    name: PhysX JNI iOS
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      java: 17
+      xcode: latest
+      vars:
+        PHYSX_JNI_REF: "2.5.1"
+    scripts:
+      - name: Clone matching physx-jni version
+        script: |
+          mkdir -p out
+          git ls-remote --tags https://github.com/fabmax/physx-jni.git > out/tags.txt || true
+          for REF in "$PHYSX_JNI_REF" "v$PHYSX_JNI_REF"; do
+            rm -rf physx-jni
+            if git clone --branch "$REF" --recursive https://github.com/fabmax/physx-jni.git; then
+              echo "cloned $REF"; break
+            fi
+          done
+          test -d physx-jni || { echo "TAG NOT FOUND - see out/tags.txt"; exit 1; }
+          cd physx-jni
+          ./gradlew :physx-jni:generateJniJavaBindings > ../out/glue.log 2>&1 || ./gradlew generateJniBindings >> ../out/glue.log 2>&1 || true
+          find PhysX/physx/source/webidlbindings -name "PhysXJniGlue.h" > ../out/glue_found.txt || true
+          cat ../out/glue_found.txt
+      - name: Patch PhysX for iOS
+        script: |
+          cat > patch_ios.py <<'PYEOF'
+          import re, shutil, os, sys, glob
+          root = sys.argv[1]  # PhysX/physx directory
+          cm = os.path.join(root, 'source/compiler/cmake')
+
+          def read(p): return open(p).read()
+          def write(p, s): open(p, 'w').write(s)
+          def fail(msg):
+              print('PATCH FAILED: ' + msg); sys.exit(1)
+
+          # 1. copy jni-mac -> jni-ios
+          src_dir = os.path.join(cm, 'jni-mac')
+          if not os.path.isdir(src_dir): fail('no jni-mac cmake dir')
+          dst = os.path.join(cm, 'jni-ios')
+          if os.path.exists(dst): shutil.rmtree(dst)
+          shutil.copytree(src_dir, dst)
+
+          # 2. jni-ios/CMakeLists.txt : include own bindings file, drop -Werror
+          p = os.path.join(dst, 'CMakeLists.txt'); s = read(p)
+          s, n = re.subn(r'jni-mac/PhysXJniBindings\.cmake', 'jni-ios/PhysXJniBindings.cmake', s)
+          if n == 0: fail('jni-mac/PhysXJniBindings.cmake include not found')
+          s = re.sub(r'\s-Werror\b', '', s)
+          write(p, s)
+
+          # 3. explicit JNI include dirs (FIND_PACKAGE(JNI) breaks when cross compiling to iOS)
+          p = os.path.join(dst, 'PhysXJniBindings.cmake'); s = read(p)
+          s, n = re.subn(r'(?im)^[ \t]*FIND_PACKAGE\(JNI[^)]*\)',
+                         'SET(JNI_INCLUDE_DIRS $ENV{JAVA_HOME}/include $ENV{JAVA_HOME}/include/darwin)', s)
+          if n == 0: fail('FIND_PACKAGE(JNI) not found')
+          write(p, s)
+
+          # 4. bin dir name
+          p = os.path.join(cm, 'modules/GetCompilerAndPlatform.cmake'); s = read(p)
+          pat = re.compile(r'(?im)^([ \t]*)ELSEIF\(TARGET_BUILD_PLATFORM STREQUAL "jni-mac"\)')
+          m = pat.search(s)
+          if not m: fail('jni-mac branch not found in GetCompilerAndPlatform.cmake')
+          ins = '%sELSEIF(TARGET_BUILD_PLATFORM STREQUAL "jni-ios")\n%s\tSET(RETVAL "jni-ios.aarch64")\n' % (m.group(1), m.group(1))
+          s = s[:m.start()] + ins + s[m.start():]
+          write(p, s)
+
+          # 5. generator script
+          p = os.path.join(root, 'buildtools/cmake_generate_projects.py'); s = read(p)
+          m = re.search(r"^([ \t]*)elif self\.targetPlatform == 'jni-mac64':", s, re.M)
+          if not m: fail("jni-mac64 branch not found in cmake_generate_projects.py")
+          i = m.group(1)
+          block = (
+           i + "elif self.targetPlatform == 'jni-ios':\n" +
+           i + "    outString = outString + ' -DTARGET_BUILD_PLATFORM=jni-ios'\n" +
+           i + "    outString = outString + ' -DPX_OUTPUT_ARCH=arm'\n" +
+           i + "    outString = outString + ' -DCMAKE_SYSTEM_NAME=iOS'\n" +
+           i + "    outString = outString + ' -DCMAKE_OSX_SYSROOT=iphoneos'\n" +
+           i + "    outString = outString + ' -DCMAKE_OSX_ARCHITECTURES=arm64'\n" +
+           i + "    outString = outString + ' -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO'\n" +
+           i + "    outString = outString + ' -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO'\n" +
+           i + "    return outString\n")
+          s = s[:m.start()] + block + s[m.start():]
+          write(p, s)
+          import ast; ast.parse(s)
+
+          # 6. preset: derive from an existing mac preset
+          pd = os.path.join(root, 'buildtools/presets/public')
+          cands = [f for f in glob.glob(pd + '/jni-mac*.xml')]
+          cands.sort(key=lambda f: ('aarch64' not in f))
+          if not cands: fail('no jni-mac preset found')
+          x = read(cands[0])
+          x = re.sub(r'(<preset name=")[^"]*(")', r'\1jni-ios-arm64\2', x, count=1)
+          x = re.sub(r'(targetPlatform=")[^"]*(")', r'\1jni-ios\2', x, count=1)
+          x = re.sub(r'install/jni-[^/"]*/PhysX', 'install/jni-ios-arm64/PhysX', x)
+          x = x.replace('value="12.0"', 'value="14.0"')
+          write(os.path.join(pd, 'jni-ios-arm64.xml'), x)
+          print('patched OK (preset from %s)' % os.path.basename(cands[0]))
+          PYEOF
+          python3 patch_ios.py physx-jni/PhysX/physx 2>&1 | tee out/patch.log
+          grep -q "patched OK" out/patch.log
+      - name: Generate and build iOS (auto-strip CUDA/particle glue)
+        script: |
+          export JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home)}"
+          echo "JAVA_HOME=$JAVA_HOME"
+          ROOT="$PWD"
+          cat > strip_gpu.py <<'PYEOF'
+          import re, sys, os
+          root, logp = sys.argv[1], sys.argv[2]
+          d = os.path.join(root, 'source/webidlbindings/src/jni')
+          names = ['PhysXJniGlue.h', 'PhysXJni.cpp']
+          log = open(logp, errors='replace').read()
+          errs = {n: set() for n in names}
+          other = set()
+          for m in re.finditer(r'^(\S+?):(\d+):\d+: (?:fatal )?error: (.*)$', log, re.M):
+              b = os.path.basename(m.group(1))
+              if b in errs: errs[b].add(int(m.group(2)))
+              else: other.add(m.group(1) + ': ' + m.group(3))
+          refs = set(re.findall(r'_(Java_\w+) in PhysXJni\.o', log))
+          print('link refs to strip: %d' % len(refs))
+          for nm in names:
+              if not refs: break
+              fp = os.path.join(d, nm)
+              if not os.path.exists(fp): continue
+              for i, l in enumerate(open(fp, errors='replace').read().split('\n')):
+                  for r in refs:
+                      if re.search(r'\b' + r + r'\s*\(', l): errs[nm].add(i + 1)
+          PP = re.compile(r'^\s*#\s*(if|ifdef|ifndef|else|elif|endif)\b')
+
+          def spans(lines):
+              out, stack, blk, cont = [], [], False, False
+              for i, line in enumerate(lines):
+                  if not blk and (cont or line.lstrip().startswith('#')):
+                      cont = line.rstrip().endswith('\\'); continue
+                  cont = False
+                  j, n = 0, len(line)
+                  while j < n:
+                      if blk:
+                          if line.startswith('*/', j): blk = False; j += 2
+                          else: j += 1
+                          continue
+                      if line.startswith('//', j): break
+                      if line.startswith('/*', j): blk = True; j += 2; continue
+                      c = line[j]
+                      if c in '"\'':
+                          j += 1
+                          while j < n and line[j] != c:
+                              if line[j] == '\\': j += 1
+                              j += 1
+                          j += 1; continue
+                      if c == '{': stack.append(i)
+                      elif c == '}' and stack: out.append((stack.pop(), i))
+                      j += 1
+              return out
+
+          def head(lines, s):
+              k = s
+              while k > 0:
+                  p = lines[k-1].strip()
+                  if (not p or p.endswith((';', '{', '}')) or p.startswith(('#', '//', '/*', '*'))
+                          or re.match(r'^(public|private|protected)\s*:$', p)):
+                      break
+                  k -= 1
+              return k
+
+          total = 0
+          for n in names:
+              if not errs[n]: continue
+              p = os.path.join(d, n)
+              lines = open(p, errors='replace').read().split('\n')
+              sp = [(head(lines, s), e) for s, e in spans(lines)
+                    if not re.match(r'^\s*(extern\s+"C"|namespace\b)', lines[head(lines, s)])]
+              kill = set()
+              for ln in errs[n]:
+                  i = ln - 1
+                  if i < 0 or i >= len(lines): continue
+                  enc = sorted([x for x in sp if x[0] <= i <= x[1]], key=lambda x: x[0] - x[1])
+                  if not enc:
+                      if not PP.match(lines[i]) and not lines[i].lstrip().startswith('#include'): kill.add((i, i))
+                      continue
+                  pick = next((x for x in enc if x[1] - x[0] <= 300), enc[-1])
+                  kill.add(pick)
+              for s, e in kill:
+                  for k in range(s, e + 1):
+                      if not PP.match(lines[k]): lines[k] = ''
+                      total += 1
+              open(p, 'w').write('\n'.join(lines))
+              print('%s: %d error lines -> %d blocks removed' % (n, len(errs[n]), len(kill)))
+          for o in sorted(other)[:20]: print('OTHER ERROR:', o)
+          sys.exit(0 if total else 3)
+          PYEOF
+          cd physx-jni/PhysX/physx
+          ./generate_projects.sh jni-ios-arm64 2>&1 | tee ../../../out/generate.log || true
+          cmake --build compiler/jni-ios-arm64 --config release --parallel 8 2>&1 | tee ../../../out/build.log || true
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            grep -q "BUILD SUCCEEDED" ../../../out/build.log && { echo "BUILD OK after $i pass"; break; }
+            grep "error:" ../../../out/build.log | sort -u > ../../../out/errors_$i.txt || true
+            python3 "$ROOT/strip_gpu.py" . ../../../out/build.log 2>&1 | tee -a ../../../out/strip.log
+            [ "${PIPESTATUS[0]}" = "0" ] || { echo "nothing more to strip"; break; }
+            cmake --build compiler/jni-ios-arm64 --config release --target PhysXJniBindings --parallel 8 2>&1 | tee ../../../out/build.log || true
+          done
+      - name: Collect, sign and verify
+        script: |
+          find physx-jni/PhysX/physx/bin -name "*.dylib" > out/found.txt || true
+          cat out/found.txt
+          test -s out/found.txt || { echo "NO DYLIB BUILT - see out/build.log"; exit 1; }
+          F=$(grep -i "PhysXJniBindings" out/found.txt | head -1)
+          [ -n "$F" ] || F=$(head -1 out/found.txt)
+          cp "$F" out/libPhysXJniBindings_64.dylib
+          codesign -f -s - out/libPhysXJniBindings_64.dylib || true
+          vtool -show-build out/libPhysXJniBindings_64.dylib | tee out/platform.txt || true
+          otool -L out/libPhysXJniBindings_64.dylib | tee out/deps.txt || true
+          nm -gU out/libPhysXJniBindings_64.dylib | grep -i "PxTopLevelFunctions" | grep -i "version" | tee out/symbols.txt || true
+          if grep -q "_Java_physx_PxTopLevelFunctions__1getPHYSICS_1VERSION" out/symbols.txt; then
+            echo "SYMBOL_OK" | tee out/symbol_check.txt
+          else
+            echo "SYMBOL_MISSING (wrong physx-jni version?)" | tee out/symbol_check.txt
+          fi
+    artifacts:
+      - out/**
