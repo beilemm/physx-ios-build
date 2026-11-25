@@ -21,7 +21,7 @@ The build runs on [Codemagic](https://codemagic.io), so no Mac is required.
    project type (it uses `codemagic.yaml`).
 4. Click **Start new build** (not "Rebuild"), select the `main` branch and the
    **PhysX JNI iOS** workflow.
-5. Wait about 30-60 minutes for the build to finish.
+5. Wait about 5-10 minutes for the build to finish.
 6. Open the **Artifacts** tab and download `libPhysXJniBindings_64.dylib`.
 7. Open `symbol_check.txt`. It must say `SYMBOL_OK`.
 
