@@ -1,0 +1,96 @@
+workflows:
+  physx-ios:
+    name: PhysX JNI iOS
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      java: 17
+      xcode: latest
+    scripts:
+      - name: Clone and generate JNI glue
+        script: |
+          mkdir -p out
+          git clone --recursive https://github.com/fabmax/physx-jni.git
+          cd physx-jni
+          ./gradlew :physx-jni:generateJniJavaBindings 2>&1 | tee ../out/glue.log
+      - name: Patch PhysX for iOS
+        script: |
+          cat > patch_ios.py <<'PYEOF'
+          import re, shutil, os, sys
+          root = sys.argv[1]  # PhysX/physx directory
+          cm = os.path.join(root, 'source/compiler/cmake')
+
+          # 1. copy jni-mac -> jni-ios
+          dst = os.path.join(cm, 'jni-ios')
+          if os.path.exists(dst):
+              shutil.rmtree(dst)
+          shutil.copytree(os.path.join(cm, 'jni-mac'), dst)
+
+          def sub(path, old, new, count=1):
+              s = open(path).read()
+              if old not in s:
+                  sys.exit('PATCH FAILED: %r not found in %s' % (old, path))
+              s = s.replace(old, new, count)
+              open(path, 'w').write(s)
+
+          # 2. jni-ios/CMakeLists.txt
+          p = os.path.join(dst, 'CMakeLists.txt')
+          sub(p, 'INCLUDE(jni-mac/PhysXJniBindings.cmake)', 'INCLUDE(jni-ios/PhysXJniBindings.cmake)')
+          sub(p, '-Wall -Wextra -Werror', '-Wall -Wextra')
+
+          # 3. explicit JNI include dirs (FIND_PACKAGE(JNI) does not work when cross compiling to iOS)
+          p = os.path.join(dst, 'PhysXJniBindings.cmake')
+          sub(p, 'FIND_PACKAGE(JNI REQUIRED)',
+              'SET(JNI_INCLUDE_DIRS $ENV{JAVA_HOME}/include $ENV{JAVA_HOME}/include/darwin)')
+
+          # 4. bin dir name
+          p = os.path.join(cm, 'modules/GetCompilerAndPlatform.cmake')
+          sub(p, '\tELSEIF(TARGET_BUILD_PLATFORM STREQUAL "jni-android")',
+              '\tELSEIF(TARGET_BUILD_PLATFORM STREQUAL "jni-ios")\n\t\tSET(RETVAL "jni-ios.aarch64")\n'
+              '\tELSEIF(TARGET_BUILD_PLATFORM STREQUAL "jni-android")')
+
+          # 5. generator script
+          p = os.path.join(root, 'buildtools/cmake_generate_projects.py')
+          sub(p, "        elif self.targetPlatform == 'jni-win64':",
+          """        elif self.targetPlatform == 'jni-ios':
+                      outString = outString + ' -DTARGET_BUILD_PLATFORM=jni-ios'
+                      outString = outString + ' -DPX_OUTPUT_ARCH=arm'
+                      outString = outString + ' -DCMAKE_SYSTEM_NAME=iOS'
+                      outString = outString + ' -DCMAKE_OSX_SYSROOT=iphoneos'
+                      outString = outString + ' -DCMAKE_OSX_ARCHITECTURES=arm64'
+                      outString = outString + ' -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO'
+                      outString = outString + ' -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO'
+                      return outString
+                  elif self.targetPlatform == 'jni-win64':""")
+
+          # 6. preset
+          src = os.path.join(root, 'buildtools/presets/public/jni-mac-aarch64.xml')
+          s = open(src).read()
+          s = s.replace('jni-mac-aarch64', 'jni-ios-arm64').replace('jni-macAarch64', 'jni-ios')
+          s = s.replace('Mac-aarch64 Xcode', 'iOS arm64 Xcode')
+          s = s.replace('install/jni-ios-arm64', 'install/jni-ios-arm64')
+          s = s.replace('value="12.0" comment="Mac minimum deployment target"', 'value="14.0" comment="iOS minimum deployment target"')
+          open(os.path.join(root, 'buildtools/presets/public/jni-ios-arm64.xml'), 'w').write(s)
+          print('patched OK')
+          PYEOF
+          python3 patch_ios.py physx-jni/PhysX/physx 2>&1 | tee out/patch.log
+      - name: Generate and build iOS
+        script: |
+          export JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home)}"
+          echo "JAVA_HOME=$JAVA_HOME"
+          cd physx-jni/PhysX/physx
+          ./generate_projects.sh jni-ios-arm64 2>&1 | tee ../../../out/generate.log || true
+          cmake --build compiler/jni-ios-arm64 --config release --parallel 8 2>&1 | tee ../../../out/build.log || true
+      - name: Collect and sign
+        script: |
+          find physx-jni/PhysX/physx/bin -name "*.dylib" > out/found.txt || true
+          cat out/found.txt
+          test -s out/found.txt || { echo "NO DYLIB BUILT - see out/build.log"; exit 1; }
+          while read f; do
+            cp "$f" out/libPhysXJniBindings_64.dylib
+          done < out/found.txt
+          codesign -f -s - out/libPhysXJniBindings_64.dylib || true
+          vtool -show-build out/libPhysXJniBindings_64.dylib | tee out/platform.txt || true
+          otool -L out/libPhysXJniBindings_64.dylib | tee out/deps.txt || true
+    artifacts:
+      - out/**
