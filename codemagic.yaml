@@ -1,0 +1,27 @@
+workflows:
+  physx-jni-probe:
+    name: PhysX JNI probe
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      java: 17
+      xcode: latest
+    scripts:
+      - name: Clone physx-jni
+        script: |
+          git clone --recursive https://github.com/fabmax/physx-jni.git
+      - name: Show build structure
+        script: |
+          cd physx-jni
+          ls -la
+          find . -name CMakeLists.txt -not -path "./PhysX/*" | head -50
+          ls buildSrc -R | head -80
+          ls physx-jni-natives-macos-arm64 -R | head -50
+      - name: Build (macOS arm64 test)
+        script: |
+          cd physx-jni
+          ./gradlew generateNativeProject || true
+          ./gradlew buildNativeProject
+          ./gradlew build
+    artifacts:
+      - physx-jni/**/*.dylib
