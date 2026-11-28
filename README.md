@@ -31,8 +31,7 @@ physx-jni **2.5.1**. In `codemagic.yaml`, keep `PHYSX_JNI_REF: "2.5.1"`.
 
 If you use another Minecraft or mod version, `PHYSX_JNI_REF` must match the
 physx-jni version bundled in your mod's `.jar`. A wrong version produces a
-dylib that does not work. Only 2.5.1 has been tested; other versions are
-untested.
+dylib that does not work.
 
 ### If the build fails
 
