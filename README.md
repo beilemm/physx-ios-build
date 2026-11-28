@@ -26,7 +26,7 @@ The build runs on [Codemagic](https://codemagic.io), so no Mac is required.
 
 ### Required version
 
-This build targets **Minecraft 26.2** (Physics Mod for 26.2), which uses
+This build targets Minecraft has Physics Mod uses
 physx-jni **2.5.1**. In `codemagic.yaml`, keep `PHYSX_JNI_REF: "2.5.1"`.
 
 If you use another Minecraft or mod version, `PHYSX_JNI_REF` must match the
