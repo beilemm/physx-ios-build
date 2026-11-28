@@ -1,7 +1,7 @@
 # PhysX JNI for iOS (arm64)
 
 Build scripts that compile [physx-jni](https://github.com/fabmax/physx-jni)
-**v2.5.1** into `libPhysXJniBindings_64.dylib` for iOS (arm64).
+**v2.3.2** into `libPhysXJniBindings_64.dylib` for iOS (arm64).
 The build runs on [Codemagic](https://codemagic.io), so no Mac is required.
 
 ## What this is
