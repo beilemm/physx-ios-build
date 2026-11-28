@@ -2,7 +2,6 @@
 
 Build scripts that compile [physx-jni](https://github.com/fabmax/physx-jni)
 **v2.5.1** into `libPhysXJniBindings_64.dylib` for iOS (arm64).
-Required for **Minecraft 26.2**.
 The build runs on [Codemagic](https://codemagic.io), so no Mac is required.
 
 ## What this is
