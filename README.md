@@ -30,8 +30,7 @@ This build targets Minecraft has Physics Mod uses physx-jni **2.2.2**. In `codem
 
 If you use another Minecraft or mod version, `PHYSX_JNI_REF` must match the
 physx-jni version bundled in your mod's `.jar`. A wrong version produces a
-dylib that does not work. Only 2.2.2 has been tested; other versions are
-untested.
+dylib that does not work.
 
 ### If the build fails
 
